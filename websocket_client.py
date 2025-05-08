@@ -16,7 +16,8 @@ class BinanceWS:
         # Combined stream URL: tüm coinlerin stream isimleri tamamen küçük harflerle olmalı.
         uri = ("wss://fstream.binance.com/stream?streams="
                "btcusdt@markPrice/ethusdt@markPrice/bnbusdt@markPrice/"
-               "solusdt@markPrice/xrpusdt@markPrice")
+               "solusdt@markPrice/xrpusdt@markPrice/adausdt@markPrice/"
+               "avaxusdt@markPrice/dogeusdt@markPrice/dotusdt@markPrice/linkusdt@markPrice")
         async with websockets.connect(uri) as ws:
             while True:
                 try:
