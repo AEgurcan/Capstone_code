@@ -1,5 +1,6 @@
 import streamlit as st
 import httpx
+import urllib.parse
 import time
 import os
 from dotenv import load_dotenv
@@ -17,12 +18,47 @@ if "page" not in st.session_state:
 if "user_ws" not in st.session_state:
     st.session_state["user_ws"] = None
 
+# .env dosyasını yukle
 dotenv_path = os.path.join(os.path.dirname(__file__), "../backend/.env")
 load_dotenv(dotenv_path)
 
 BASE_URL = "http://localhost:8000"
 
-# === Giriş yapılmamışsa ===
+# Eger URL'de reset_token varsa, sifre sifirlama ekranini goster
+query_params = st.query_params
+if "reset_token" in query_params:
+    reset_token = query_params["reset_token"][0]
+    st.title("🔒 Şifre Sıfırlama")
+    st.info("Lütfen yeni şifrenizi girin.")
+
+    new_password = st.text_input("Yeni Şifre", type="password")
+    confirm = st.text_input("Yeni Şifre (Tekrar)", type="password")
+
+    if st.button("Şifreyi Güncelle"):
+        if new_password != confirm:
+            st.error("Şifreler uyuşmuyor.")
+        elif len(new_password) < 6:
+            st.warning("Şifre en az 6 karakter olmalı.")
+        else:
+            try:
+                response = httpx.post(
+                    f"{BASE_URL}/auth/reset-password",
+                    json={
+                        "token": reset_token,
+                        "new_password": new_password
+                    },
+                    timeout=60
+                )
+                if response.status_code == 200:
+                    st.success("Şifreniz başarıyla güncellendi! Giriş yapabilirsiniz.")
+                else:
+                    st.error("Şifre güncellenemedi: " + response.text)
+            except Exception as e:
+                st.error(f"Hata oluştu: {e}")
+
+    st.stop()  # Diğer giriş ekranlarını göstermemek için
+
+# === Giriş yapılmamışsa, sidebar gizle ve login/register sayfası göster ===
 if not st.session_state["token"]:
     st.markdown(
         """
@@ -60,31 +96,64 @@ if not st.session_state["token"]:
                 st.session_state["auth_page"] = "register"
                 st.rerun()
 
+        if st.button("Şifremi Unuttum"):
+            st.session_state["auth_page"] = "reset_request"
+            st.rerun()
+
+    elif st.session_state["auth_page"] == "reset_request":
+        st.title("🔐 Şifre Yenileme Talebi")
+        st.info("E-posta adresinizi girin. Şifre yenileme bağlantısı gönderilecektir.")
+        reset_email = st.text_input("E-posta Adresi")
+
+        if st.button("Gönder"):
+            if not reset_email.strip():
+                st.error("Lütfen geçerli bir e-posta adresi girin.")
+            else:
+                try:
+                    resp = httpx.post(
+                        f"{BASE_URL}/auth/request-password-reset",
+                        json={"email": reset_email},
+                        timeout=60
+                    )
+                    if resp.status_code == 200:
+                        st.success("Yenileme bağlantısı e-posta adresinize gönderildi!")
+                    else:
+                        st.error("Gönderilemedi: " + resp.text)
+                except Exception as e:
+                    st.error(f"Hata oluştu: {e}")
+
+        if st.button("← Giriş Ekranına Dön"):
+            st.session_state["auth_page"] = "login"
+            st.rerun()
+
+
     elif st.session_state["auth_page"] == "register":
         st.title("🔑 Capstone Projesi – Kayıt Ol")
         st.header("Yeni Hesap Oluştur")
         email = st.text_input("E-posta adresi", key="register_email")
         password = st.text_input("Şifre", type="password", key="register_password")
 
+        # Üç kolon: boşluğu neredeyse sıfıra çekmek için
         col1, col_gap, col2 = st.columns([1, 0.001, 1])
         with col1:
             if st.button("Kayıt Ol"):
-                try:
-                    with httpx.Client() as client:
-                        response = client.post(
-                            f"{BASE_URL}/auth/register",
-                            json={"email": email, "password": password}
-                        )
-                    if response.status_code == 200:
-                        st.success("Kayıt başarıyla oluşturuldu!")
-                    else:
-                        try:
-                            detail = response.json().get("detail", "Bir hata oluştu.")
-                        except Exception:
-                            detail = f"Geçersiz yanıt: {response.text}"
-                        st.error(detail)
-                except Exception as e:
-                    st.error(f"Sunucuya bağlanırken hata oluştu: {str(e)}")
+                with httpx.Client() as client:
+                    response = client.post(
+                        f"{BASE_URL}/auth/register",
+                        json={"email": email, "password": password},
+                        timeout=5
+                    )
+                if response.status_code == 200:
+                    st.success("Kayıt başarıyla oluşturuldu!")
+                else:
+                    # JSONDecodeError'tan kaçınmak için önce JSON mu diye deneyelim:
+                    try:
+                        body = response.json()
+                        detail = body.get("detail") or str(body)
+                    except ValueError:
+                        # JSON değilse düz text olarak al
+                        detail = response.text or f"Hata kodu: {response.status_code}"
+                    st.error(detail)
 
         with col2:
             if st.button("Giriş Yap"):
@@ -93,28 +162,57 @@ if not st.session_state["token"]:
 
 # === Giriş yapıldıysa ===
 else:
-    menu = st.sidebar.radio("Menü", ["API Ayarları", "Kullanıcı Bilgileri", "Market Data"],
+    menu = st.sidebar.radio("Menü", ["API Ayarları","Kullanıcı Bilgileri","Market Data"],
                             index=2 if st.session_state["page"] == "Market Data" else 1)
 
+    # --- API Ayarları: Anahtar / Secret girilecek form ---
     if menu == "API Ayarları":
         st.header("📡 Binance API Ayarları")
         token = st.session_state["token"]
         headers = {"Authorization": f"Bearer {token}"}
 
-        # Mevcut değerleri al
+        # --- 1) Backend’den gerçek değeri oku ---
         resp = httpx.get(f"{BASE_URL}/user/api-keys", headers=headers, timeout=5)
         data = resp.json()
-        api_key = st.text_input("API Key",    value=data.get("api_key",""))
-        api_secret = st.text_input("API Secret", value=data.get("api_secret",""), type="password")
+        raw_api_key = data.get("api_key", "")
+        raw_api_secret = data.get("api_secret", "")
+
+
+        # --- 2) Maskelme fonksiyonu ---
+        def mask_key(k: str) -> str:
+            if len(k) <= 4:
+                return "*" * len(k)
+            return k[:2] + "*" * (len(k) - 4) + k[-2:]
+
+
+        # --- 3) Ekranda maskeli göster, ama değeri sakla ---
+        st.text_input("Mevcut API Key", value=mask_key(raw_api_key), disabled=True)
+        st.text_input("Mevcut API Secret", value=mask_key(raw_api_secret), disabled=True, type="password")
+
+        st.markdown("---")
+        st.write("### Yeni Anahtarlar (isteğe bağlı)")
+        new_key = st.text_input("Yeni API Key", placeholder="Yapıştırın veya boş bırakın")
+        new_secret = st.text_input("Yeni API Secret", placeholder="Yapıştırın veya boş bırakın", type="password")
 
         if st.button("Kaydet"):
-            payload = {"api_key": api_key, "api_secret": api_secret}
-            r = httpx.post(f"{BASE_URL}/user/api-keys", headers=headers, json=payload, timeout=5)
+            # Yeni girildiyse onu, yoksa eskisini kullan
+            send_key = new_key if new_key else raw_api_key
+            send_secret = new_secret if new_secret else raw_api_secret
+
+            r = httpx.post(
+                f"{BASE_URL}/user/api-keys",
+                headers=headers,
+                json={"api_key": send_key, "api_secret": send_secret},
+                timeout=5
+            )
             if r.status_code == 200:
-                st.success("API anahtarınız kaydedildi!")
+                st.success("API anahtarınız başarıyla kaydedildi!")
+                # user_ws’i sıfırla ki yeni anahtarla yeniden deneyelim
+                st.session_state.pop("user_ws", None)
                 st.rerun()
             else:
-                st.error("Kaydedilemedi: "+r.text)
+                st.error("Kaydedilemedi: " + r.text)
+
 
     elif menu == "Kullanıcı Bilgileri":
         st.header("Kullanıcı Bilgilerim")
@@ -261,55 +359,58 @@ else:
         # ======================
         # 1) Ticker yukarıda gösterilsin
         # ======================
-        ticker_placeholder = st.empty()
+        # İki placeholder oluştur
+        top_ph = st.empty()
+        bot_ph = st.empty()
+
         # Pozisyon/trade placeholder’ları
-        port_ph = st.empty()
+        # Portföy için tek placeholder
+        portfolio_ph = st.empty()
         trade_title_ph = st.empty()
         trade_body_ph = st.empty()
 
         # Takip ettiğimiz semboller:
-        small_coin_map = {
+        top_coins = {
             "BTCUSDT": "BTC/USDT",
             "ETHUSDT": "ETH/USDT",
             "BNBUSDT": "BNB/USDT",
             "SOLUSDT": "SOL/USDT",
-            "XRPUSDT": "XRP/USDT"
+            "XRPUSDT": "XRP/USDT",
+        }
+        bottom_coins = {
+            "ADAUSDT": "ADA/USDT",
+            "AVAXUSDT": "AVAX/USDT",
+            "DOGEUSDT": "DOGE/USDT",
+            "DOTUSDT": "DOT/USDT",
+            "LINKUSDT": "LINK/USDT",
         }
 
-        def render_ticker(prices):
-            """Her saniye güncellenecek Ticker HTML'ini oluşturur."""
-            small_coin_map = {
-                "BTCUSDT": "BTC/USDT",
-                "ETHUSDT": "ETH/USDT",
-                "BNBUSDT": "BNB/USDT",
-                "SOLUSDT": "SOL/USDT",
-                "XRPUSDT": "XRP/USDT"
-            }
-            # Eğer websocketten bir coin verisi gelmezse "N/A" gösterilsin
-            ticker_html = '<div class="ticker-container">'
-            for symbol, short_label in small_coin_map.items():
-                raw_price = prices.get(symbol)  # dict.get() -> None if not found
-                if raw_price is not None:
-                    price_float = float(raw_price)
-                    formatted_price = f"${price_float:,.2f}"
-                else:
-                    formatted_price = "N/A"
+        # ➊ Üst ve altı birleştiriyoruz
+        all_coins = {**top_coins, **bottom_coins}
 
-                # Ticker kutusu
-                ticker_html += (
+        def render_ticker(prices, coin_map):
+            html = '<div class="ticker-container">'
+            for sym, lbl in coin_map.items():
+                raw = prices.get(sym)
+                if raw is not None:
+                    price = float(raw)
+                    disp = f"${price:,.2f}"
+                else:
+                    disp = "N/A"
+                html += (
                     f'<div class="ticker-box">'
-                    f'<p class="small-ticker-label">{short_label}</p>'
-                    f'<p class="small-ticker-price">{formatted_price}</p>'
+                    f'  <p class="small-ticker-label">{lbl}</p>'
+                    f'  <p class="small-ticker-price">{disp}</p>'
                     f'</div>'
                 )
-            ticker_html += "</div>"
-            return ticker_html
+            html += "</div>"
+            return html
 
         # 6) Portföy render fonksiyonu (positionAmt × currentPrice)
-        def render_portfolio(positions, prices):
+        def render_portfolio(positions, prices, coin_map):
             total = 0.0
             details = ""
-            for sym, lbl in small_coin_map.items():
+            for sym, lbl in coin_map.items():
                 amt = float(positions.get(sym, {}).get("positionAmt", 0))
                 price = float(prices.get(sym, 0))
                 val = amt * price
@@ -324,21 +425,29 @@ else:
             )
 
         # ---- User Stream: Pozisyon & Trade History ----
-        if not st.session_state["user_ws"]:
-            # eğer henüz yoksa kullanıcıdan al
-            # backend’den kaydedilmiş keyleri çekip kur
-            token = st.session_state["token"]
-            headers = {"Authorization": f"Bearer {token}"}
-            r = httpx.get(f"{BASE_URL}/user/api-keys", headers=headers, timeout=5)
-            d = r.json()
-            if d.get("api_key") and d.get("api_secret"):
-                st.session_state["user_ws"] = get_user_ws(d["api_key"], d["api_secret"])
+        # 1) Backend’den gerçek API anahtarlarını al
+        token = st.session_state["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            resp = httpx.get(f"{BASE_URL}/user/api-keys", headers=headers, timeout=5)
+            if resp.status_code != 200:
+                st.error(f"Anahtarları alırken hata: {resp.status_code} {resp.text}")
+                raw_api_key = raw_api_secret = ""
             else:
-                # st.warning("Lütfen önce API Ayarları sayfasından anahtarlarınızı kaydedin.")
-                # st.stop()
-                # yoksa boş geç
-                st.session_state["user_ws"] = None
+                data = resp.json()
+                raw_api_key = data.get("api_key", "")
+                raw_api_secret = data.get("api_secret", "")
+        except (httpx.HTTPError, ValueError) as e:
+            st.error(f"Anahtarları alırken beklenmedik hata: {e}")
+            raw_api_key = raw_api_secret = ""
 
+        # 2) Eğer daha önce user_ws oluşturulmadıysa ve anahtar varsa başlat
+        if st.session_state["user_ws"] is None and raw_api_key:
+            try:
+                st.session_state["user_ws"] = get_user_ws(raw_api_key, raw_api_secret)
+            except httpx.HTTPStatusError:
+                st.error("Binance API anahtarlarınız geçersiz veya yetkisiz.")
+                st.session_state["user_ws"] = None
 
         user_ws = st.session_state["user_ws"]
 
@@ -346,17 +455,25 @@ else:
         while True:
             # — Public ticker güncellemesi (her koşulda)
             prices = st.session_state["ws_client"].latest_prices
-            ticker_placeholder.markdown(render_ticker(prices), unsafe_allow_html=True)
+            # üst satır
+            top_ph.markdown(
+                render_ticker(prices, top_coins),
+                unsafe_allow_html=True
+            )
+            # alt satır
+            bot_ph.markdown(
+                render_ticker(prices, bottom_coins),
+                unsafe_allow_html=True
+            )
 
             # — Kullanıcı stream’i varsa dinamik bölümleri güncelle
             if user_ws:
-                # — Portföy güncelle
-                port_ph.markdown(
-                    render_portfolio(user_ws.positions, prices),
+                portfolio_ph.markdown(
+                    render_portfolio(user_ws.positions, prices, all_coins),
                     unsafe_allow_html=True
                 )
             else:
-                port_ph.info("Portföy görmek için API anahtarlarınızı girin.")
+                portfolio_ph.info("Portföy görmek için API anahtarlarınızı girin.")
 
             # — Açık pozisyonlar / trade history
             if user_ws:
