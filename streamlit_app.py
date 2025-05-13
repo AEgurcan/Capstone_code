@@ -25,9 +25,22 @@ load_dotenv(dotenv_path)
 BASE_URL = "http://localhost:8000"
 
 # Eger URL'de reset_token varsa, sifre sifirlama ekranini goster
-query_params = st.query_params
-if "reset_token" in query_params:
-    reset_token = query_params["reset_token"][0]
+
+# 1) Eğer token query'de varsa ve geçerliyse, belleğe al
+
+if "reset_token" not in st.session_state:
+    query_params = st.experimental_get_query_params()
+    raw_token = query_params.get("reset_token", [None])[0]
+    if raw_token and len(raw_token.split(".")) == 3:
+        st.session_state["reset_token"] = urllib.parse.unquote(raw_token)
+
+# 2) Artık sadece session_state üzerinden kontrol ederiz
+reset_token = st.session_state.get("reset_token")
+
+
+
+
+if reset_token:
     st.title("🔒 Şifre Sıfırlama")
     st.info("Lütfen yeni şifrenizi girin.")
 
@@ -51,10 +64,12 @@ if "reset_token" in query_params:
                 )
                 if response.status_code == 200:
                     st.success("Şifreniz başarıyla güncellendi! Giriş yapabilirsiniz.")
+                    st.session_state.pop("reset_token", None)  # Token'ı bellekte tutma
                 else:
                     st.error("Şifre güncellenemedi: " + response.text)
             except Exception as e:
                 st.error(f"Hata oluştu: {e}")
+
 
     st.stop()  # Diğer giriş ekranlarını göstermemek için
 
