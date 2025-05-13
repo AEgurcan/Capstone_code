@@ -175,7 +175,8 @@ async def request_password_reset(req: PasswordResetRequest, db: AsyncSession = D
     if not user:
         raise HTTPException(404, "Kullanıcı bulunamadı")
 
-    reset_token = create_jwt_token({"sub": user.email})
+    from datetime import timedelta
+    reset_token = create_jwt_token({"sub": user.email}, expires_delta=timedelta(minutes=5))
     reset_link = f"http://localhost:8501/?reset_token={reset_token}"
 
     # E-posta içeriği
@@ -187,14 +188,18 @@ async def request_password_reset(req: PasswordResetRequest, db: AsyncSession = D
     )
     fm = FastMail(conf)
     await fm.send_message(message)
+    
 
     return {"message": "Şifre sıfırlama bağlantısı e-posta adresinize gönderildi."}
 
 @app.post("/auth/reset-password")
 async def reset_password(data: PasswordReset, db: AsyncSession = Depends(get_db)):
+    print("🔐 TOKEN GELDİ:", data.token)
     try:
         payload = decode_jwt_token(data.token)
-    except Exception:
+        print("✅ DECODE BAŞARILI:", payload)
+    except Exception as e:
+        print("❌ JWT HATASI:", str(e))
         raise HTTPException(400, "Geçersiz veya süresi dolmuş token")
 
     email = payload.get("sub")
@@ -208,3 +213,4 @@ async def reset_password(data: PasswordReset, db: AsyncSession = Depends(get_db)
     await db.commit()
 
     return {"message": "Şifreniz başarıyla güncellendi."}
+
