@@ -2,9 +2,20 @@ import streamlit as st
 import httpx
 import urllib.parse
 import time
+import asyncio
 import os
 from dotenv import load_dotenv
 from websocket_client import get_binance_ws, get_user_ws
+import pandas as pd
+from dotenv import load_dotenv
+from websocket_client import get_binance_ws, get_user_ws
+from database import get_async_session
+from models import User
+from background_jobs import start_user_loop, stop_user_loop
+from sqlalchemy.future import select
+
+st.set_page_config(layout="wide") # sayfanın geniş olmasını sağlıyor
+
 
 # === Session State Initialize ===
 if "token" not in st.session_state:
@@ -17,6 +28,8 @@ if "page" not in st.session_state:
     st.session_state["page"] = "Market Data"
 if "user_ws" not in st.session_state:
     st.session_state["user_ws"] = None
+if "trading_active" not in st.session_state:
+    st.session_state["trading_active"] = False
 
 # .env dosyasını yukle
 dotenv_path = os.path.join(os.path.dirname(__file__), "../backend/.env")
@@ -29,7 +42,7 @@ BASE_URL = "http://localhost:8000"
 # 1) Eğer token query'de varsa ve geçerliyse, belleğe al
 
 if "reset_token" not in st.session_state:
-    query_params = st.experimental_get_query_params()
+    query_params = st.query_params
     raw_token = query_params.get("reset_token", [None])[0]
     if raw_token and len(raw_token.split(".")) == 3:
         st.session_state["reset_token"] = urllib.parse.unquote(raw_token)
@@ -72,7 +85,7 @@ if reset_token:
 
 
     st.stop()  # Diğer giriş ekranlarını göstermemek için
-
+    
 # === Giriş yapılmamışsa, sidebar gizle ve login/register sayfası göster ===
 if not st.session_state["token"]:
     st.markdown(
@@ -262,7 +275,7 @@ else:
             st.rerun()
 
     elif menu == "Market Data":
-        st.session_state["page"] = "Market Data"
+                        
 
         # Sayfa başlığı
         st.markdown("## Canlı Fiyatlar – Binance USDS Futures")
@@ -370,6 +383,37 @@ else:
             """,
             unsafe_allow_html=True
         )
+        st.session_state["page"] = "Market Data"
+
+        if "trading_active" not in st.session_state:
+            st.session_state["trading_active"] = False
+
+        from background_jobs import start_user_loop, stop_user_loop
+        from models import User
+        from database import get_async_session
+        from sqlalchemy.future import select    
+
+
+        async def handle_trading_button():
+            async with get_async_session() as session:
+                token = st.session_state["token"]
+                headers = {"Authorization": f"Bearer {token}"}
+                resp = httpx.get(f"{BASE_URL}/user/me", headers=headers)
+                if resp.status_code == 200:
+                    email = resp.json().get("email")
+                    result = await session.execute(select(User).where(User.email == email))
+                    user = result.scalar_one_or_none()
+                    if user:
+                        if st.session_state["trading_active"]:
+                            stop_user_loop(user.id)
+                            st.session_state["trading_active"] = False
+                        else:
+                            start_user_loop(user)
+                            st.session_state["trading_active"] = True
+                    else:
+                        st.error("Kullanıcı bulunamadı.")
+        if st.button("🟢 Otomatik Trading'i Başlat" if not st.session_state["trading_active"] else "🔴 Otomatik Trading'i Durdur"):
+            asyncio.run(handle_trading_button())
 
         # ======================
         # 1) Ticker yukarıda gösterilsin
@@ -402,6 +446,7 @@ else:
 
         # ➊ Üst ve altı birleştiriyoruz
         all_coins = {**top_coins, **bottom_coins}
+        
 
         def render_ticker(prices, coin_map):
             html = '<div class="ticker-container">'
@@ -420,6 +465,7 @@ else:
                 )
             html += "</div>"
             return html
+        
 
         # 6) Portföy render fonksiyonu (positionAmt × currentPrice)
         def render_portfolio(positions, prices, coin_map):
@@ -490,16 +536,52 @@ else:
             else:
                 portfolio_ph.info("Portföy görmek için API anahtarlarınızı girin.")
 
-            # — Açık pozisyonlar / trade history
+            # — Açık Pozisyonlar / trade history —
             if user_ws:
-                trades = user_ws.trade_history[-99:]
                 trade_title_ph.markdown("### Açık Pozisyonlar")
-                if trades:
-                    trade_body_ph.table(trades)
+
+                rows = []
+                for sym, pos in user_ws.positions.items():
+                    amt = float(pos.get("positionAmt", 0))
+                    if amt == 0:
+                        continue
+
+                    entry = float(pos.get("entryPrice", 0))
+                    cur = float(prices.get(sym, 0))
+                    notional = amt * cur
+                    leverage = pos.get("leverage", "")
+                    liq_price = pos.get("liquidationPrice") or ""
+                    pnl = amt * (cur - entry)
+                    pos_side = pos.get("positionSide", "")
+                    margin_typ = pos.get("marginType", "")
+
+                    rows.append({
+                        "Coin": all_coins.get(sym, sym),
+                        "Miktar": f"{amt:.4f}",
+                        "Giriş Fiyatı": f"${entry:,.2f}",
+                        "Mevcut Fiyat": f"${cur:,.2f}",
+                        "Değer (USDT)": f"${notional:,.2f}",
+                        "Kaldıraç": leverage,
+                        "Margin Type": margin_typ,
+                        "Position Side": pos_side,
+                        "Liq. Fiyatı": f"${float(liq_price):,.2f}" if liq_price else "-",
+                        "P&L": f"${pnl:,.2f}"
+                    })
+
+                if rows:
+                    # Sırasıyla istediğin kolonları göster
+                    df = pd.DataFrame(rows)[[
+                        "Coin", "Miktar", "Giriş Fiyatı", "Mevcut Fiyat",
+                        "Değer (USDT)", "Kaldıraç", "Margin Type",
+                        "Position Side", "Liq. Fiyatı", "P&L"
+                    ]]
+                    # indexi gizleyip yazdır
+                    trade_body_ph.dataframe(df, use_container_width=True)
+
                 else:
                     trade_body_ph.info("Şu anda açık pozisyonunuz bulunmuyor.")
             else:
                 trade_title_ph.empty()
                 trade_body_ph.empty()
 
-            time.sleep(1)
+        time.sleep(1)
