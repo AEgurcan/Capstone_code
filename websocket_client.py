@@ -1,54 +1,8 @@
-import asyncio
-import threading
-import websockets
-import json
-import httpx
-import os
+import asyncio, threading, time, hmac, hashlib, json, websockets, httpx
 
-# ——— Public Ticker WebSocket ———
-
-class BinanceWS:
-    def __init__(self):
-        self.latest_prices = {}
-        self._start_ws_thread()
-
-    async def _listen(self):
-        # Combined stream URL: tüm coinlerin stream isimleri tamamen küçük harflerle olmalı.
-        uri = ("wss://fstream.binance.com/stream?streams="
-               "btcusdt@markPrice/ethusdt@markPrice/bnbusdt@markPrice/"
-               "solusdt@markPrice/xrpusdt@markPrice/adausdt@markPrice/"
-               "avaxusdt@markPrice/dogeusdt@markPrice/dotusdt@markPrice/linkusdt@markPrice")
-        async with websockets.connect(uri) as ws:
-            while True:
-                try:
-                    message = await ws.recv()
-                    data = json.loads(message)
-                    # Combined stream mesajları: {"stream": "<streamName>", "data": { ... }}
-                    if "data" in data:
-                        data = data["data"]
-                    if "s" in data and "p" in data:
-                        self.latest_prices[data["s"]] = data["p"]
-                        print(f"Received {data['s']} price: {data['p']}")
-                except Exception as e:
-                    print("WebSocket error:", e)
-                    break
-
-    def _start_ws_thread(self):
-        thread = threading.Thread(target=self._run, daemon=True)
-        thread.start()
-
-    def _run(self):
-        asyncio.run(self._listen())
-
-
-def get_binance_ws():
-    return BinanceWS()
-
-
-# ——— User Data Stream WebSocket ———
-
+# Binance Futures REST/WebSocket endpoints
 FAPI_REST = "https://fapi.binance.com"
-FAPI_WS = "wss://fstream.binance.com/ws"
+FAPI_WS   = "wss://fstream.binance.com/ws"
 
 def start_user_data_stream(api_key: str):
     headers = {"X-MBX-APIKEY": api_key}
@@ -58,40 +12,92 @@ def start_user_data_stream(api_key: str):
 
 def keepalive_user_data_stream(api_key: str, listen_key: str):
     headers = {"X-MBX-APIKEY": api_key}
-    httpx.put(
-        f"{FAPI_REST}/fapi/v1/listenKey",
-        headers=headers,
-        params={"listenKey": listen_key},
-        timeout=5
-    )
+    httpx.put(f"{FAPI_REST}/fapi/v1/listenKey",
+              headers=headers,
+              params={"listenKey": listen_key},
+              timeout=5)
+
+class BinanceWS:
+    def __init__(self):
+        self.latest_prices = {}
+        threading.Thread(target=self._run, daemon=True).start()
+
+    async def _listen(self):
+        uri = (
+            "wss://fstream.binance.com/stream?streams="
+            "btcusdt@markPrice/ethusdt@markPrice/"
+            "bnbusdt@markPrice/solusdt@markPrice/"
+            "xrpusdt@markPrice/adausdt@markPrice/"
+            "avaxusdt@markPrice/dogeusdt@markPrice/"
+            "dotusdt@markPrice/linkusdt@markPrice"
+        )
+        async with websockets.connect(uri) as ws:
+            while True:
+                msg = await ws.recv()
+                d = json.loads(msg).get("data", {})
+                if "s" in d and "p" in d:
+                    self.latest_prices[d["s"]] = d["p"]
+
+    def _run(self):
+        asyncio.run(self._listen())
+
+def get_binance_ws():
+    return BinanceWS()
 
 class BinanceUserWS:
     def __init__(self, api_key: str, api_secret: str):
         self.api_key = api_key
         self.api_secret = api_secret
-        self.listen_key = start_user_data_stream(api_key)
         self.positions = {}
         self.trade_history = []
-        self._start()
+
+        self._refresh_positions()
+        self.listen_key = start_user_data_stream(self.api_key)
+        threading.Thread(target=self._run_stream, daemon=True).start()
+        threading.Thread(target=self._refresh_loop, daemon=True).start()
+
+    def _refresh_positions(self):
+        ts = int(time.time() * 1000)
+        qs = f"timestamp={ts}"
+        sig = hmac.new(self.api_secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        url = f"{FAPI_REST}/fapi/v2/account?{qs}&signature={sig}"
+        headers = {"X-MBX-APIKEY": self.api_key}
+        r = httpx.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        new = {}
+        for p in r.json().get("positions", []):
+            if float(p.get("positionAmt", 0)) != 0:
+                new[p["symbol"]] = p
+        self.positions = new
+
+    def _refresh_loop(self):
+        while True:
+            time.sleep(30)
+            try:
+                self._refresh_positions()
+            except Exception as e:
+                print("⚠ Pozisyon yenileme hatası:", e)
 
     async def _keepalive(self):
         while True:
-            await asyncio.sleep(30*60)
+            await asyncio.sleep(30 * 60)
             keepalive_user_data_stream(self.api_key, self.listen_key)
 
     async def _listen(self):
-        uri = f"{FAPI_WS}/{self.listen_key}"
-        async with websockets.connect(uri) as ws:
-            # keepalive’i schedule et
-            _task = asyncio.create_task(self._keepalive())
+        async with websockets.connect(f"{FAPI_WS}/{self.listen_key}") as ws:
+            asyncio.create_task(self._keepalive())
             while True:
-                msg = await ws.recv()
-                ev  = json.loads(msg)
-                e   = ev.get("e")
-                if e == "ACCOUNT_UPDATE":
+                ev = json.loads(await ws.recv())
+                evt = ev.get("e")
+                if evt == "ACCOUNT_UPDATE":
                     for p in ev["a"].get("P", []):
-                        self.positions[p["s"]] = p
-                elif e == "ORDER_TRADE_UPDATE":
+                        sym = p["s"]
+                        amt = float(p.get("positionAmt", 0))
+                        if amt != 0:
+                            self.positions[sym] = p
+                        else:
+                            self.positions.pop(sym, None)
+                elif evt == "ORDER_TRADE_UPDATE":
                     o = ev["o"]
                     if o.get("x") == "TRADE":
                         self.trade_history.append({
@@ -102,8 +108,8 @@ class BinanceUserWS:
                             "time":     o["T"]
                         })
 
-    def _start(self):
-        threading.Thread(target=lambda: asyncio.run(self._listen()), daemon=True).start()
+    def _run_stream(self):
+        asyncio.run(self._listen())
 
 def get_user_ws(api_key: str, api_secret: str):
     return BinanceUserWS(api_key, api_secret)
