@@ -15,12 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from cryptography.fernet import Fernet, InvalidToken
 
-
 KEY = os.getenv("FERNET_KEY").encode()
 cipher = Fernet(KEY)
 
+
 def encrypt_val(val: str) -> str:
     return cipher.encrypt(val.encode()).decode()
+
 
 def decrypt_val(token: str) -> str:
     return cipher.decrypt(token.encode()).decode()
@@ -33,20 +34,25 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     yield
 
+
 app = FastAPI(lifespan=lifespan)
+
 
 # --- Auth modelleri ---
 class UserRegister(BaseModel):
     email: str
     password: str
 
+
 class UserLogin(BaseModel):
     email: str
     password: str
 
+
 class ApiKeyIn(BaseModel):
     api_key: str
     api_secret: str
+
 
 # --- Kayıt ---
 @app.post("/auth/register")
@@ -64,6 +70,7 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     await db.commit()
     return {"message": "Kullanıcı başarıyla kaydedildi!"}
 
+
 # --- Giriş ---
 @app.post("/auth/login")
 async def login(user: UserLogin, db: AsyncSession = Depends(get_db)):
@@ -73,6 +80,7 @@ async def login(user: UserLogin, db: AsyncSession = Depends(get_db)):
         raise HTTPException(401, "Geçersiz kimlik bilgisi")
     token = create_jwt_token({"sub": db_user.email})
     return {"access_token": token, "token_type": "bearer"}
+
 
 # --- Mevcut kullanıcı bilgileri ---
 @app.get("/user/me")
@@ -92,12 +100,13 @@ async def get_user_info(Authorization: str = Header(None), db: AsyncSession = De
         "created_at": str(user.created_at)
     }
 
+
 # --- API Key/Get & Set ---
 @app.post("/user/api-keys")
 async def set_api_keys(
-    payload: ApiKeyIn,
-    Authorization: str = Header(None),
-    db: AsyncSession = Depends(get_db)
+        payload: ApiKeyIn,
+        Authorization: str = Header(None),
+        db: AsyncSession = Depends(get_db)
 ):
     if not Authorization:
         raise HTTPException(401, "Token eksik!")
@@ -140,19 +149,25 @@ async def get_api_keys(Authorization: str = Header(None), db: AsyncSession = Dep
         except InvalidToken:
             # zaten şifrelenmemiş
             return val
+
     return {
         "api_key": try_decrypt(user.api_key or ""),
         "api_secret": try_decrypt(user.api_secret or "")
     }
+
+
 from fastapi.responses import JSONResponse
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+
 
 class PasswordResetRequest(BaseModel):
     email: str
 
+
 class PasswordReset(BaseModel):
     token: str
     new_password: str
+
 
 # --- SMTP Ayarı ---
 conf = ConnectionConfig(
@@ -161,8 +176,8 @@ conf = ConnectionConfig(
     MAIL_FROM=os.getenv("MAIL_FROM"),
     MAIL_PORT=int(os.getenv("MAIL_PORT")),
     MAIL_SERVER=os.getenv("MAIL_SERVER"),
-    MAIL_STARTTLS=True,      
-    MAIL_SSL_TLS=False,      
+    MAIL_STARTTLS=True,
+    MAIL_SSL_TLS=False,
     USE_CREDENTIALS=True,
     VALIDATE_CERTS=True
 )
@@ -188,9 +203,9 @@ async def request_password_reset(req: PasswordResetRequest, db: AsyncSession = D
     )
     fm = FastMail(conf)
     await fm.send_message(message)
-    
 
     return {"message": "Şifre sıfırlama bağlantısı e-posta adresinize gönderildi."}
+
 
 @app.post("/auth/reset-password")
 async def reset_password(data: PasswordReset, db: AsyncSession = Depends(get_db)):
@@ -212,5 +227,4 @@ async def reset_password(data: PasswordReset, db: AsyncSession = Depends(get_db)
     db.add(user)
     await db.commit()
 
-    return {"message": "Şifreniz başarıyla güncellendi."}
-
+    return {"message": "Şifreniz başarıyla güncellendi."}
