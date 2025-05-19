@@ -3,7 +3,27 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
+from sqlalchemy import Column, Integer, Float, DateTime
+from sqlalchemy.orm import declarative_base
 
+Base = declarative_base()
+
+
+class Prediction(Base):
+    __tablename__ = "predictions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime)
+
+    adausdt_pred = Column(Integer)
+    avaxusdt_pred = Column(Integer)
+    bnbusdt_pred = Column(Integer)
+    btcusdt_pred = Column(Integer)
+    dogeusdt_pred = Column(Integer)
+    dotusdt_pred = Column(Integer)
+    ethusdt_pred = Column(Integer)
+    linkusdt_pred = Column(Integer)
+    solusdt_pred = Column(Integer)
 
 class User(Base):
     __tablename__ = "Users"
