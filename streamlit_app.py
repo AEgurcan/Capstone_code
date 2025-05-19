@@ -13,6 +13,7 @@ from database import get_async_session
 from models import User
 from background_jobs import start_user_loop, stop_user_loop
 from sqlalchemy.future import select
+from datetime import datetime
 
 st.set_page_config(layout="wide") # sayfanın geniş olmasını sağlıyor
 
@@ -43,8 +44,8 @@ BASE_URL = "http://localhost:8000"
 
 if "reset_token" not in st.session_state:
     query_params = st.query_params
-    raw_token = query_params.get("reset_token", [None])[0]
-    if raw_token and len(raw_token.split(".")) == 3:
+    raw_token = query_params.get("reset_token")
+    if raw_token:
         st.session_state["reset_token"] = urllib.parse.unquote(raw_token)
 
 # 2) Artık sadece session_state üzerinden kontrol ederiz
@@ -187,6 +188,8 @@ if not st.session_state["token"]:
             if st.button("Giriş Yap"):
                 st.session_state["auth_page"] = "login"
                 st.rerun()
+
+
 
 # === Giriş yapıldıysa ===
 else:
@@ -512,6 +515,9 @@ else:
 
         user_ws = st.session_state["user_ws"]
 
+        st.markdown("## Pozisyon Geçmişi (Son 7 Gün)")
+        hist_ph = st.empty()
+
         # 3) Sonsuz döngü — her 1 saniyede bir güncelle
         while True:
             # — Public ticker güncellemesi (her koşulda)
@@ -555,6 +561,11 @@ else:
                     pos_side = pos.get("positionSide", "")
                     margin_typ = pos.get("marginType", "")
 
+                    if amt > 0:
+                        pos_side = "LONG"
+                    else:
+                        pos_side = "SHORT"
+
                     rows.append({
                         "Coin": all_coins.get(sym, sym),
                         "Miktar": f"{amt:.4f}",
@@ -583,5 +594,83 @@ else:
             else:
                 trade_title_ph.empty()
                 trade_body_ph.empty()
+            if user_ws:
+                now_ms = int(time.time() * 1000)
+                seven_days_ago = now_ms - 7 * 24 * 3600 * 1000
+
+                # ➋ Tüm semboller için trade’leri çek
+                all_trades = []
+                for sym in all_coins.keys():
+                    try:
+                        trades = user_ws.fetch_user_trades(sym,
+                                                           startTime=seven_days_ago,
+                                                           endTime=now_ms)
+                        all_trades += trades
+                    except Exception as e:
+                        st.warning(f"{sym} trade geçmişi alınırken hata: {e}")
+
+                # ➌ Chrono-sort
+                all_trades.sort(key=lambda t: t["time"])
+
+                # ➍ Pozisyon bazında grupla
+                history = []
+                # state: sym → (net_qty, open_ts, pnl_acc, comm_acc, open_dir)
+                state = {}
+
+                for t in all_trades:
+                    sym = t["symbol"]
+                    qty = float(t["qty"])
+                    side = t["side"]  # "BUY" veya "SELL"
+                    pnl = float(t.get("realizedPnl", 0))
+                    comm = float(t.get("commission", 0))
+
+                    # trade yönü LONG için +, SHORT için −
+                    # hedge açıksa positionSide kullanacağız, yoksa side’a bakacağız
+                    ps_api = t.get("positionSide")
+                    if ps_api in ("LONG", "SHORT"):
+                        # hedge modunda
+                        sign = 1 if ps_api == "LONG" else -1
+                    else:
+                        # one-way modda, BUY→LONG, SELL→SHORT
+                        sign = 1 if side == "BUY" else -1
+
+                    net, open_ts, pnl_acc, comm_acc, open_dir = state.get(
+                        sym, (0, None, 0, 0, None)
+                    )
+
+                    prev_net = net
+                    net += sign * qty
+                    pnl_acc += pnl
+                    comm_acc += comm
+
+                    # pozisyon açılışı
+                    if prev_net == 0 and net != 0:
+                        open_ts = t["time"]
+                        open_dir = sign
+
+                    # pozisyon kapanışı
+                    if prev_net != 0 and net == 0 and open_ts is not None:
+                        history.append({
+                            "Coin": sym,
+                            "PositionSide": "LONG" if open_dir > 0 else "SHORT",
+                            "OpenTime": datetime.fromtimestamp(open_ts / 1000).strftime("%Y-%m-%d %H:%M:%S"),
+                            "CloseTime": datetime.fromtimestamp(t["time"] / 1000).strftime("%Y-%m-%d %H:%M:%S"),
+                            "RealizedPnL": round(pnl_acc, 6),
+                            "Commission": round(comm_acc, 6),
+                        })
+                        # reset for next
+                        open_ts, pnl_acc, comm_acc, open_dir = None, 0, 0, None
+
+                    state[sym] = (net, open_ts, pnl_acc, comm_acc, open_dir)
+
+                if history:
+                    df_hist = pd.DataFrame(history)[[
+                        "Coin", "PositionSide", "OpenTime", "CloseTime", "RealizedPnL", "Commission"
+                    ]]
+                    hist_ph.dataframe(df_hist, use_container_width=True)
+                else:
+                    hist_ph.info("Son 7 gün içinde tamamlanmış pozisyonunuz yok.")
+            else:
+                hist_ph.info("Pozisyon geçmişini görmek için geçerli API anahtarlarınızı girin.")    
 
         time.sleep(1)
