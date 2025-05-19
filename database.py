@@ -47,3 +47,10 @@ Base = declarative_base()
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+# Otomatik async session üretici
+async_session = async_sessionmaker(engine, expire_on_commit=False)
+
+async def get_async_session() -> AsyncSession:
+    return async_session()
