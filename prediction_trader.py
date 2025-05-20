@@ -12,24 +12,37 @@ from binance_trader import (
 )
 from datetime import datetime, timedelta
 import math
+from decimal import Decimal, ROUND_DOWN
 
-# List of trading pairs to process
-PAIR_KEYS = [
-    "adausdt", "avaxusdt", "bnbusdt", "btcusdt",
-    "dogeusdt", "dotusdt", "ethusdt", "linkusdt", "solusdt"
-]
+# Map each trading pair to its fixed quantity
+PAIR_TO_FIXED_QTY = {
+    "adausdt": 1000,
+    "avaxusdt": 50,
+    "bnbusdt": 3,
+    "btcusdt": 0.01,
+    "dogeusdt": 500,
+    "dotusdt": 100,
+    "ethusdt": 0.05,
+    "linkusdt": 30,
+    "solusdt": 10
+}
+
+def quantize_qty(qty: float, step: float) -> float:
+    """
+    Round down qty to the nearest multiple of step.
+    """
+    return float(Decimal(str(qty)).quantize(Decimal(str(step)), rounding=ROUND_DOWN))
 
 async def trade_from_latest_prediction(user: User, trade_size_usdt: float):
     """
-    Reads the most recent prediction (after a 4h+1m delay) and executes
-    MARKET orders on the appropriate TESTNET or PROD endpoint.
-    trade_size_usdt defines how much USDT to risk per trade.
+    Fetch the latest prediction (4h+1m old) and open/close positions
+    using fixed quantities per symbol. Uses send_binance_order for open
+    and close_position for closing existing positions.
     """
     session: AsyncSession = await get_async_session()
     try:
         print("🔍 [DEBUG] trade_from_latest_prediction called.")
 
-        # Calculate cutoff timestamp: 4 hours and 1 minute ago
         cutoff = datetime.utcnow() - timedelta(hours=4, minutes=1)
         result = await session.execute(
             select(Prediction)
@@ -45,8 +58,8 @@ async def trade_from_latest_prediction(user: User, trade_size_usdt: float):
 
         print(f"[✅] Processing signals from {latest.timestamp}...")
 
-        for pair in PAIR_KEYS:
-            sig = getattr(latest, f"{pair}_pred")
+        for pair, raw_target in PAIR_TO_FIXED_QTY.items():
+            sig = getattr(latest, f"{pair}_pred", None)
             if sig not in (-1, 0, 1):
                 continue
 
@@ -58,46 +71,40 @@ async def trade_from_latest_prediction(user: User, trade_size_usdt: float):
             # ① Fetch price and exchange filters
             price = float(await get_mark_price(user.api_key, user.api_secret, symbol))
             filters = await get_symbol_filters(user.api_key, user.api_secret, symbol)
-            step = filters.get("stepSize")
-            min_notional = filters.get("minNotional", 0)
+            step_size = float(filters.get("stepSize", 1))
+            min_notional = float(filters.get("minNotional", 0))
 
-            # ② Compute raw qty and adjust to stepSize precision
-            precision = int(round(-math.log10(step), 0))
-            raw_qty = trade_size_usdt / price
-            qty_floor = math.floor(raw_qty * (10 ** precision)) / (10 ** precision)
+            # ② Quantize the fixed target qty to stepSize
+            qty = quantize_qty(raw_target, step_size)
 
-            # ③ Ensure minNotional: compute minimum qty to satisfy NB*price >= min_notional
-            min_qty = math.ceil((min_notional / price) / step) * step
-            qty = max(qty_floor, min_qty)
+            print(f"[DEBUG] {symbol}: price={price}, stepSize={step_size}, "
+                  f"raw_target={raw_target}, final_qty={qty}")
 
-            print(f"[DEBUG] {symbol}: price={price}, step={step}, raw_qty={raw_qty}, qty_floor={qty_floor}, min_qty={min_qty}, final_qty={qty}")
-
-            # Skip if below stepSize or zero or notional < minNotional
-            if qty < step or qty * price < min_notional:
-                print(f"[WARN] {symbol}: final_qty {qty} below stepSize or notional < minNotional, skipping.")
+            # ③ Skip if below stepSize or notional < minNotional
+            if qty < step_size or qty * price < min_notional:
+                print(f"[WARN] {symbol}: final_qty {qty} below stepSize or "
+                      f"notional < minNotional ({min_notional}), skipping.")
                 continue
 
             # ④ Execute based on signal
             if sig == 1 and current_amt == 0:
+                # Open long
                 await send_binance_order(
-                    user.api_key, user.api_secret, symbol, "BUY", qty,
+                    user.api_key, user.api_secret,
+                    symbol, "BUY", qty
                 )
             elif sig == -1 and current_amt == 0:
+                # Open short
                 await send_binance_order(
-                    user.api_key, user.api_secret, symbol, "SELL", qty,
-                    
+                    user.api_key, user.api_secret,
+                    symbol, "SELL", qty
                 )
             elif sig == 0 and current_amt != 0:
-                # Closing position: similar adjustments
-                raw_close = abs(current_amt)
-                close_floor = math.floor(raw_close * (10 ** precision)) / (10 ** precision)
-                close_qty = max(close_floor, math.ceil((min_notional / price) / step) * step)
-                if close_qty < step or close_qty * price < min_notional:
-                    print(f"[WARN] {symbol}: close_qty {close_qty} below stepSize or notional < minNotional, skipping close.")
-                    continue
-                side = "SELL" if current_amt > 0 else "BUY"
-                await send_binance_order(
-                    user.api_key, user.api_secret, symbol, side, close_qty
+                # Close existing position
+                # close_position handles reduceOnly logic internally
+                await close_position(
+                    user.api_key, user.api_secret,
+                    symbol, abs(current_amt)
                 )
 
         print("[🚀] All trades executed.")
