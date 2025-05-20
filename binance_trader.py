@@ -18,25 +18,7 @@ BASE_URL = "https://testnet.binancefuture.com" if USE_TESTNET else "https://fapi
 def create_signature(query_string: str, secret_key: str) -> str:
     return hmac.new(secret_key.encode(), query_string.encode(), hashlib.sha256).hexdigest()
 
-# --- Get lot size stepSize for symbol ---
-async def get_symbol_step_size(api_key: str, api_secret: str, symbol: str) -> float:
-    """Her coin için exchangeInfo'dan lot stepSize'ı döner ve doğru precision hesaplanır."""
-    url = f"{BASE_URL}/fapi/v1/exchangeInfo?symbol={symbol}"
-    headers = {"X-MBX-APIKEY": api_key}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-    symbols = data.get("symbols", [])
-    if not symbols:
-        raise RuntimeError(f"Exchange info bulunamadı: {symbol}")
-    info = symbols[0]
-    for f in info.get("filters", []):
-        if f.get("filterType") == "LOT_SIZE":
-            return float(f.get("stepSize"))
-    raise RuntimeError("stepSize bulunamadı")
-
-# binance_trader.py içinde (get_symbol_step_size’ın yanına)
+# --- Get lot size stepSize and minNotional filters for symbol ---
 async def get_symbol_filters(api_key: str, api_secret: str, symbol: str) -> dict:
     """
     exchangeInfo’dan hem stepSize hem minNotional değerlerini getirir.
@@ -46,19 +28,17 @@ async def get_symbol_filters(api_key: str, api_secret: str, symbol: str) -> dict
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
-        info = resp.json()["symbols"][0]
+        info = resp.json().get("symbols", [])[0]
 
     out = {}
-    for f in info["filters"]:
-        if f["filterType"] == "LOT_SIZE":
-            out["stepSize"] = float(f["stepSize"])
-        elif f["filterType"] == "MIN_NOTIONAL":
-            out["minNotional"] = float(f["notional"])
+    for f in info.get("filters", []):
+        if f.get("filterType") == "LOT_SIZE":
+            out["stepSize"] = float(f.get("stepSize"))
+        elif f.get("filterType") == "MIN_NOTIONAL":
+            out["minNotional"] = float(f.get("notional"))
     return out
 
-
-
-# --- Get current position amount ---
+# --- Get current position amount with 401 handling ---
 async def get_position_amount(api_key: str, api_secret: str, symbol: str) -> float:
     endpoint = "/fapi/v2/positionRisk"
     timestamp = int(time.time() * 1000)
@@ -67,9 +47,15 @@ async def get_position_amount(api_key: str, api_secret: str, symbol: str) -> flo
     url = f"{BASE_URL}{endpoint}?{qs}&signature={sig}"
     headers = {"X-MBX-APIKEY": api_key}
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                print(f"[⚠️] {symbol}: 401 Unauthorized—API key or endpoint error.")
+                return 0.0
+            raise
     for item in data:
         if item.get("symbol") == symbol:
             return float(item.get("positionAmt", 0))
@@ -89,7 +75,7 @@ async def get_mark_price(api_key: str, api_secret: str, symbol: str) -> float:
         data = resp.json()
     return float(data.get("markPrice", 0))
 
-# --- Send Market Order ---
+# --- Send Market Order with precision & percent_price fallback ---
 async def send_binance_order(api_key: str, api_secret: str, symbol: str, side: str, quantity: float):
     """
     Send a MARKET order, with fallbacks:
