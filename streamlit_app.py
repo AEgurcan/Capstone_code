@@ -14,6 +14,11 @@ from models import User
 from background_jobs import start_user_loop, stop_user_loop
 from sqlalchemy.future import select
 from datetime import datetime
+from prediction_trader import trade_from_latest_prediction
+
+
+load_dotenv()  
+USE_TESTNET = os.getenv("USE_TESTNET", "False") == "True"
 
 st.set_page_config(layout="wide") # sayfanın geniş olmasını sağlıyor
 
@@ -277,11 +282,56 @@ else:
             st.session_state["page"] = "Market Data"
             st.rerun()
 
-    elif menu == "Market Data":
-                        
+    
+    
+    async def handle_trading_button(trade_size_usdt: float):
+        session = await get_async_session()
+        try:
+            token = st.session_state["token"]
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = httpx.get(f"{BASE_URL}/user/me", headers=headers)
+            if resp.status_code == 200:
+                email = resp.json().get("email")
+                result = await session.execute(select(User).where(User.email == email))
+                user = result.scalar_one_or_none()
+                if user:
+                    if st.session_state["trading_active"]:
+                        stop_user_loop(user.id)
+                        st.session_state["trading_active"] = False
+                    else:
+                        start_user_loop(user, trade_size_usdt)
+                        st.session_state["trading_active"] = True
+                else:
+                    st.error("Kullanıcı bulunamadı.")
+        finally:
+            await session.close()
+
+
+    if menu == "Market Data":
+
 
         # Sayfa başlığı
         st.markdown("## Canlı Fiyatlar – Binance USDS Futures")
+
+        trade_size_usdt = st.number_input(
+            "Pozisyon Büyüklüğü (USDT):",
+            min_value=1.0,
+            value=10.0,
+            step=1.0,
+            help="Her işlemde kullanmak istediğiniz USDT miktarı"
+        )
+
+        
+
+
+        # 1) Toggle button (calls your async start/stop logic)
+        
+        if st.button(
+            ("🟢 Başlat" if not st.session_state["trading_active"] else "🔴 Durdur"),
+            key="trade_toggle"
+        ):
+            asyncio.run(handle_trading_button(trade_size_usdt))
+
 
         # ======================
         # 0) Ortak CSS
@@ -394,29 +444,9 @@ else:
         from background_jobs import start_user_loop, stop_user_loop
         from models import User
         from database import get_async_session
-        from sqlalchemy.future import select    
+        from sqlalchemy.future import select   
+        import asyncio 
 
-
-        async def handle_trading_button():
-            async with get_async_session() as session:
-                token = st.session_state["token"]
-                headers = {"Authorization": f"Bearer {token}"}
-                resp = httpx.get(f"{BASE_URL}/user/me", headers=headers)
-                if resp.status_code == 200:
-                    email = resp.json().get("email")
-                    result = await session.execute(select(User).where(User.email == email))
-                    user = result.scalar_one_or_none()
-                    if user:
-                        if st.session_state["trading_active"]:
-                            stop_user_loop(user.id)
-                            st.session_state["trading_active"] = False
-                        else:
-                            start_user_loop(user)
-                            st.session_state["trading_active"] = True
-                    else:
-                        st.error("Kullanıcı bulunamadı.")
-        if st.button("🟢 Otomatik Trading'i Başlat" if not st.session_state["trading_active"] else "🔴 Otomatik Trading'i Durdur"):
-            asyncio.run(handle_trading_button())
 
         # ======================
         # 1) Ticker yukarıda gösterilsin
@@ -514,6 +544,7 @@ else:
                 st.session_state["user_ws"] = None
 
         user_ws = st.session_state["user_ws"]
+        
 
         st.markdown("## Pozisyon Geçmişi (Son 7 Gün)")
         hist_ph = st.empty()
