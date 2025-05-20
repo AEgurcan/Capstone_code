@@ -285,6 +285,15 @@ else:
     
     
     async def handle_trading_button(trade_size_usdt: float):
+        from dotenv import load_dotenv
+        import os
+
+        # .env dosyasını yükle
+        load_dotenv()
+        USE_TESTNET = os.getenv("USE_TESTNET", "False") == "True"
+        TEST_KEY = os.getenv("TESTNET_API_KEY")
+        TEST_SECRET = os.getenv("TESTNET_API_SECRET")
+
         session = await get_async_session()
         try:
             token = st.session_state["token"]
@@ -295,16 +304,25 @@ else:
                 result = await session.execute(select(User).where(User.email == email))
                 user = result.scalar_one_or_none()
                 if user:
+                    # — TESTNET MODU: .env'deki TESTNET_* değerlerini user objesine ata
+                    if USE_TESTNET:
+                        user.api_key = TEST_KEY
+                        user.api_secret = TEST_SECRET
+
                     if st.session_state["trading_active"]:
                         stop_user_loop(user.id)
                         st.session_state["trading_active"] = False
                     else:
+                        # ① Döngüyü başlat (4h+1dk scheduler)
                         start_user_loop(user, trade_size_usdt)
+                        # ② İlk trade’i hemen yap (butona basınca)
+                        await trade_from_latest_prediction(user, trade_size_usdt)
                         st.session_state["trading_active"] = True
                 else:
                     st.error("Kullanıcı bulunamadı.")
         finally:
             await session.close()
+
 
 
     if menu == "Market Data":
