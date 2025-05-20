@@ -1,38 +1,53 @@
 import asyncio
+from datetime import datetime, timedelta
 from typing import Dict
 from prediction_trader import trade_from_latest_prediction
 from models import User
 
-# Her kullanıcı için asyncio task'larını tutan sözlük
+# Kullanıcıya ait asyncio task'larını tutan sözlük
 user_tasks: Dict[int, asyncio.Task] = {}
 
-def start_user_loop(user: User):
+def start_user_loop(user: User, trade_size_usdt: float):
     """
     Kullanıcının Binance hesabı için trade döngüsünü başlatır.
-    4 saatte bir (ve 1 dakika sonra) prediction tablosunu okuyarak işlem yapar.
+    Her gün 00:01, 04:01, 08:01, 12:01, 16:01, 20:01 saatlerinde prediction tablosunu okuyarak işlem yapar.
     """
     async def periodic_task():
-        try:
-            while True:
-                now = asyncio.get_event_loop().time()
-                delay_until_next_block = 4 * 60 * 60  # 4 saat
-                one_minute = 60
-                await asyncio.sleep(delay_until_next_block + one_minute)
-                await trade_from_latest_prediction(user)
-        except asyncio.CancelledError:
-            print(f"[❌] Task iptal edildi: user_id={user.id}")
-        except Exception as e:
-            print(f"[⚠️] Task hata verdi (user_id={user.id}): {e}")
+        # İlk tetik zamanını hesapla
+        now = datetime.now()
+        block = (now.hour // 4) + 1
+        next_hour = (block * 4) % 24
+        next_run = now.replace(hour=next_hour, minute=1, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
 
-    # Aynı kullanıcı için tekrar başlatma
+        # İlk uyku: bir sonraki 4h+1dk noktasına kadar bekle
+        initial_delay = (next_run - now).total_seconds()
+        await asyncio.sleep(initial_delay)
+
+        # Döngü: her 4 saatte bir tetikle
+        while True:
+            try:
+                await trade_from_latest_prediction(user, trade_size_usdt)
+            except asyncio.CancelledError:
+                print(f"[❌] Task iptal edildi: user_id={user.id}")
+                break
+            except Exception as e:
+                print(f"[⚠️] Task hata verdi (user_id={user.id}): {e}")
+
+            # Bir sonraki çalıştırma için 4 saat bekle
+            await asyncio.sleep(4 * 3600)
+
+    # Aynı kullanıcı için tekrar başlatma kontrolü
     if user.id in user_tasks:
         print(f"[ℹ️] Kullanıcı zaten çalışıyor: user_id={user.id}")
         return
 
-    # Görevi başlat
+    # Görevi başlat ve kaydet
     task = asyncio.create_task(periodic_task())
     user_tasks[user.id] = task
     print(f"[✅] Görev başlatıldı: user_id={user.id}")
+
 
 def stop_user_loop(user_id: int):
     """
