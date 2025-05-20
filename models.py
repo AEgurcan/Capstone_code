@@ -12,8 +12,7 @@ Base = declarative_base()
 class Prediction(Base):
     __tablename__ = "predictions"
 
-    id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime)
+    timestamp = Column(DateTime, primary_key=True, index=True)
 
     adausdt_pred = Column(Integer)
     avaxusdt_pred = Column(Integer)
